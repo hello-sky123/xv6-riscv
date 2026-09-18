@@ -1,6 +1,41 @@
-K=kernel
-U=user
+K=kernel  # 内核态代码
+U=user  # 用户态代码
 
+# 第一部分：启动与底层硬件 (Boot & Hardware)
+#   . $K/entry.o: 内核的绝对入口（汇编代码）。机器启动后执行的第一条指令就在这里，主要负责设置好最初的 C 语言运行堆栈。
+#   . $K/start.o: 机器模式（Machine Mode）下的初始化。配置好硬件特权级后，跳入 Supervisor Mode（操作系统内核所在的特权级）。
+#   . $K/main.o: 内核的 main() 函数所在处。负责依次调用各个子系统的初始化函数。
+#   . $K/plic.o: 平台级中断控制器（Platform-Level Interrupt Controller）。负责管理外部硬件设备（如键盘、网卡）发来的中断信号。
+# 第二部分：内存管理 (Memory Management)
+#   . $K/kalloc.o: 物理内存分配器。管理物理内存页的分配和释放（把内存按 4KB 划分并用链表管理）。
+#   . $K/vm.o: 虚拟内存（Virtual Memory）。操作系统中最烧脑的部分之一，负责建立和管理页表 (Page Table)，将虚拟地址映射到物理地址。
+# 第三部分：进程与调度 (Process & Scheduling)
+#   . $K/proc.o: 进程管理与 CPU 调度器。管理进程的状态（就绪、运行、休眠），并决定下一个让哪个进程使用 CPU。
+#   . $K/swtch.o: 上下文切换（Context Switch，纯汇编代码）。负责在两个进程之间切换 CPU 的寄存器状态。
+# 第四部分：中断与异常 (Traps & Exceptions)
+#   . $K/trampoline.o: 蹦床代码（汇编代码）。用户态和内核态之间切换时，极其精巧的过渡代码，因为必须映射在所有进程页表的最高地址，所以被称为蹦床。
+#   . $K/trap.o: C 语言写的中断处理核心逻辑。当发生系统调用、缺页、除零错误或硬件中断时，都会陷入这里。
+#   . $K/kernelvec.o: 内核态下发生中断时的处理入口（汇编）。
+# 第五部分：系统调用 (System Calls)
+#   . $K/syscall.o: 系统调用分发器。从用户态收到系统调用号后，在这里查表，路由到具体的处理函数。
+#   . $K/sysproc.o: 进程相关的系统调用实现（比如 fork, exit, kill, sleep 等）。
+# 第六部分：并发与同步 (Concurrency)
+#   . $K/spinlock.o: 自旋锁。用于多核 CPU 下保护短时间访问的共享数据（拿不到锁就一直死循环等）。
+#   . $K/sleeplock.o: 睡眠锁。用于长时间操作（如读写磁盘）时的同步（拿不到锁就让出 CPU 去睡觉）。
+# 第七部分：文件系统与存储 (File System & Storage)
+#   . $K/virtio_disk.o: 磁盘驱动（基于 VirtIO 标准）。告诉内核如何跟虚拟机的硬盘通信。
+#   . $K/bio.o: 块缓存（Block I/O）。磁盘太慢了，这里用内存缓存磁盘的块数据，提高读写速度。
+#   . $K/log.o: 崩溃恢复与日志（Journaling）。保证文件系统如果在写到一半时突然断电，重启后数据不会损坏。
+#   . $K/fs.o: 文件系统核心。管理 inode（文件索引节点）、目录、以及磁盘的布局。
+#   . $K/file.o: 文件描述符层。在 Linux/UNIX 中“一切皆文件”，这个文件统一了控制台、管道、实际文件的读写接口。
+#   . $K/pipe.o: 管道。用于两个进程之间通信（比如 shell 里的 ls | grep）。
+#   . $K/exec.o: exec 机制。负责从磁盘读取一个可执行文件（ELF格式），丢弃进程原来的旧内存，装载新代码并执行。
+#   . $K/sysfile.o: 文件相关的系统调用实现（比如 read, write, open, close 等）。
+# 第八部分：工具与杂项 (Utilities)
+#   . $K/console.o: 控制台。处理键盘的输入字符和屏幕的输出字符。
+#   . $K/uart.o: 串口驱动。与底层 UART 芯片交互，完成实际的字符收发。
+#   . $K/printk.o: 内核专属的打印函数 printf。
+#   . $K/string.o: 内核自己实现的 C 语言字符串和内存处理函数（如 memset, memmove 等，因为内核不能用 C 标准库）。
 OBJS = \
   $K/entry.o \
   $K/start.o \
@@ -35,6 +70,10 @@ OBJS = \
 #TOOLPREFIX = 
 
 # Try to infer the correct TOOLPREFIX if not set
+# xxx-objdump -i 列出支持的所有目标文件格式，2>&1：将标准错误输出（stderr，代号 2）重定向到标准输出（stdout，代号 1）
+# 如果系统没有安装 objdump，执行上述命令会报 "command not found" 的错误，通过 2>&1，这个报错信息可以顺着管道流给下一个
+# 命令，而不是打印到屏幕上干扰用户，if 判断命令的退出状态（0 成功，判断为真），>/dev/null 2>&1，只关心 grep 成功还是失败，不需要
+# 它把匹配内容打印出来，>/dev/null 等价于 1>/dev/null，将 stdout 丢掉，2>&1 将 stderr 也丢掉，elf64-big 几个通用基础格式之一
 ifndef TOOLPREFIX
 TOOLPREFIX := $(shell if riscv64-unknown-elf-objdump -i 2>&1 | grep 'elf64-big' >/dev/null 2>&1; \
 	then echo 'riscv64-unknown-elf-'; \
