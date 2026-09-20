@@ -1,5 +1,6 @@
-K=kernel  # 内核态代码
-U=user  # 用户态代码
+# K: 内核态代码目录; U: 用户态代码目录
+K=kernel
+U=user
 
 # 第一部分：启动与底层硬件 (Boot & Hardware)
 #   . $K/entry.o: 内核的绝对入口（汇编代码）。机器启动后执行的第一条指令就在这里，主要负责设置好最初的 C 语言运行堆栈。
@@ -100,16 +101,24 @@ OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
 
 # Deterministic builds.
+# 将编译时的绝对路径在编译产物中替换为 .（当前目录相对路径），编译产物跨电脑哈希值一致
 DETFLAGS = -ffile-prefix-map=$(CURDIR)=.
 
+# 打开所有警告，抑制未知属性警告，O1 优化，保留栈帧指针，便于追踪调用栈，生成 gdb 友好的 DWARF 2 调试信息
 CFLAGS = -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2
 CFLAGS += $(DETFLAGS)
+# 目标指令集架构（rv 是 risc-v 的缩写，gc 两个标准扩展的缩写）
 CFLAGS += -march=rv64gc
+# C99 的 gnu 扩展，生成编译依赖文件（.d 文件）
 CFLAGS += -std=gnu99
 CFLAGS += -MD
+# 内核能被加载到什么位置（medlow 加载到低 2GB 区域，medany 加载到任意 64 位地址）
 CFLAGS += -mcmodel=medany
+# C 标准实现环境（hosted（宿主）有完整标准库、程序从 main 开始、有操作系统，freestanding（独立）没有 main 约定，只有极少数头文件）
 CFLAGS += -ffreestanding
+# GCC 10 以前默认 -fcommon 各自产生 common 符合，链接时合并到同一块存储，不报错，多文件同名全局变量默默共享。链接层：一个库都不带
 CFLAGS += -fno-common -nostdlib
+# 关闭 GCC 的内建优化，防止替换以下函数
 CFLAGS += -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset
 CFLAGS += -fno-builtin-memmove -fno-builtin-memcmp -fno-builtin-log -fno-builtin-bzero
 CFLAGS += -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin-putc
@@ -117,9 +126,13 @@ CFLAGS += -fno-builtin-free
 CFLAGS += -fno-builtin-memcpy -Wno-main
 CFLAGS += -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf
 CFLAGS += -I.
+# 关闭安全保护（栈溢出）
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
 
 # Disable PIE when possible (for Ubuntu 16.10 toolchain)
+# Ubuntu 16.10 开始默认把所有程序编译成 PIE（位置无关可执行文件），提升安全性，但是内核需要链接/加载到固定位置
+# ifneq 判断 A != B，这里第二个参数是空字符，所以是判断 shell 输出是否为空，-dumpspecs 让 GCC 打印它的 specs 文件——一份控制
+# GCC 各阶段（编译、汇编、链接）默认行为的内部配置文本，匹配前面不是 f 的 no-pie，-fno-pie 编译阶段，-no-pie 链接阶段
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
 CFLAGS += -fno-pie -no-pie
 endif
@@ -127,21 +140,29 @@ ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
 CFLAGS += -fno-pie -nopie
 endif
 
+# 链接器的默认段对齐是 2MB，-z 是传给 ld 的链接器专属选项前缀（由 GCC 转发），最大页尺寸是 4KB，使得编译出来的内核文件非常紧凑
 LDFLAGS = -z max-page-size=4096
 
+# 把所有目标文件（$(OBJS)）按链接脚本 kernel.ld 链接成内核 ELF（$K/kernel），再用 objdump 生成两个调试副产品
+#（带源码的反汇编 .asm 和符号表 .sym），第一行是列出目标和依赖，后面几行是命令，-T 使用自定义链接脚本，-o 指定输出文件
+# objdump -S 生成带源码的反汇编，-t + seed 管道：生成精简符号表，-t 生成的是完整符号表，seed 精简符号表
 $K/kernel: $(OBJS) $K/kernel.ld
 	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $K/kernel $(OBJS) 
 	$(OBJDUMP) -S $K/kernel > $K/kernel.asm
 	$(OBJDUMP) -t $K/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $K/kernel.sym
 
+# 前面的 OBJS 里既有 C 文件，也有汇编文件，这里告诉 make 如何处理汇编文件
 $K/%.o: $K/%.S
 	$(CC) -march=rv64gc -g $(DETFLAGS) -c -o $@ $<
 
+# tags 是伪目标，不会生成名为 tags 的文件，etags 生成索引文件
 tags: $(OBJS)
 	etags kernel/*.S kernel/*.c
 
+# 用户态微型 C 标准库
 ULIB = $U/ulib.o $U/usys.o $U/printf.o $U/umalloc.o
 
+# _% 匹配所有以下划线开头的目标，_ 是 xv6 Makefile 用来区分：用户程序源码/目标文件和最终生成的用户可执行文件
 _%: %.o $(ULIB) $U/user.ld
 	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ $< $(ULIB)
 	$(OBJDUMP) -S $@ > $*.asm
