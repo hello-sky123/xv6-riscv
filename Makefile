@@ -218,9 +218,12 @@ UPROGS=\
 	$U/_dorphan\
 	$U/_sync\
 
+# 把散落的文件打包成真正的操作系统磁盘镜像 fs.img
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
 
+# .d 文件是编译依赖文件，记录了每个 .o 依赖的 .c/.h 文件，-include 让 make 在找不到 .d 文件时不报错
+# 把上面编译期顺产的依赖记录回灌给 make————头文件改动自动感知
 -include kernel/*.d user/*.d
 
 clean: 
@@ -241,9 +244,15 @@ ifndef CPUS
 CPUS := 3
 endif
 
+# 虚拟机硬件配置清单
+# -machine virt：虚拟通用主板，-bios none：不加载 BIOS 固件，-kernel：指定内核 ELF 文件，-m 128M：分配 128MB 内存
+# -smp $(CPUS)：分配 CPU 核心数，-nographic：不使用图形界面
 QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 128M -smp $(CPUS) -nographic
+# -global 设置全局设备属性， virtio-mmio.force-legacy=false：禁用 VirtIO MMIO 设备的 legacy 模式，确保使用现代驱动
 QEMUOPTS += -global virtio-mmio.force-legacy=false
+# -drive 定义物理载体（后端数据源），file=fs.img：指定磁盘镜像文件，if=none：不直接连接到总线，format=raw：原始格式，id=x0：设备标识符
 QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x0
+# 定义虚拟硬件（前端控制器），在虚拟主板上，焊上一个 virtio-blk-device 设备，连接到前面定义的磁盘镜像（drive=x0），挂载在 virtio-mmio-bus.0 总线上
 QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 
 qemu: check-qemu-version $K/kernel fs.img
