@@ -168,18 +168,23 @@ _%: %.o $(ULIB) $U/user.ld
 	$(OBJDUMP) -S $@ > $*.asm
 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $*.sym
 
-$U/usys.S : $U/usys.pl
+# 自动生成用户态系统调用汇编桩 usys.S，usys.pl 是一个 Perl 脚本，读取系统调用号和名称，生成对应的汇编代码
+$U/usys.S: $U/usys.pl
 	perl $U/usys.pl > $U/usys.S
 
-$U/usys.o : $U/usys.S
+# 单独编译 usys.S，生成 usys.o，-c 只编译不链接，-o 指定输出文件名
+$U/usys.o: $U/usys.S
 	$(CC) $(CFLAGS) -c -o $U/usys.o $U/usys.S
 
+# 用户态程序 forktest 的特殊处理，链接时不带 printf、malloc 等库函数，减小可执行文件体积，以便在进程表中创建更多进程
+# 裁剪库文件：只链接 ulib.o 和 usys.o，-N 让链接器不为可执行文件分配额外空间，-e main 指定入口函数，-Ttext 0 指定加载地址为 0
 $U/_forktest: $U/forktest.o $(ULIB)
 	# forktest has less library code linked in - needs to be small
 	# in order to be able to max out the proc table.
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $U/_forktest $U/forktest.o $U/ulib.o $U/usys.o
 	$(OBJDUMP) -S $U/_forktest > $U/forktest.asm
 
+# 运行在开发机上的打包工具————负责在 make qemu 时把所有用户程序和 README 文件打包成一个磁盘镜像 fs.img，供 QEMU 启动时挂载
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 	gcc -Wno-unknown-attributes -I. -o mkfs/mkfs mkfs/mkfs.c
 
@@ -187,6 +192,8 @@ mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
 # that disk image changes after first build are persistent until clean.  More
 # details:
 # http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
+# 默认情况下 GNU make 会把链式规则临时生成的中间文件（如 cat.o）在构建完就删掉，这会让 xv6 的 fs.img 在下次构建时被判定过期
+# 由 mkfs 从头重建，从而冲掉 QEMU 运行期间写进镜像的数据；因此阻止删除这些 .o，让磁盘镜像的修改一直有效，直到 make clean 显式清场
 .PRECIOUS: %.o
 
 UPROGS=\
