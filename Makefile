@@ -261,6 +261,7 @@ qemu: check-qemu-version $K/kernel fs.img
 .gdbinit: .gdbinit.tmpl-riscv
 	sed "s/:1234/:$(GDBPORT)/" < $^ > $@
 
+# 运行 QEMU 并在另一个终端启动 GDB 调试器，-S：启动时暂停 CPU，等待 GDB 连接，-gdb：指定 GDB 监听的 TCP 端口
 qemu-gdb: $K/kernel .gdbinit fs.img
 	@echo "*** Now run 'gdb' in another window." 1>&2
 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
@@ -268,13 +269,16 @@ qemu-gdb: $K/kernel .gdbinit fs.img
 print-gdbport:
 	@echo $(GDBPORT)
 
+# 使用正则表达式提取 QEMU 版本号的主版本和次版本，忽略补丁版本，确保 QEMU 版本满足最低要求
 QEMU_VERSION := $(shell $(QEMU) --version | head -n 1 | sed -E 's/^QEMU emulator version ([0-9]+\.[0-9]+)\..*/\1/')
+# @ 表示执行命令时不打印命令本身，if 判断 QEMU 版本是否小于最低要求，若是则打印错误信息并退出
 check-qemu-version:
 	@if [ "$(shell echo "$(QEMU_VERSION) >= $(MIN_QEMU_VERSION)" | bc)" -eq 0 ]; then \
 		echo "ERROR: Need qemu version >= $(MIN_QEMU_VERSION)"; \
 		exit 1; \
 	fi
 
+# 代码格式化工具目标，wildcard 匹配指定目录下的所有 C 和头文件，clang-format -i 直接修改文件内容，使代码风格统一
 .PHONY: fmt
 fmt:
 	clang-format -i $(wildcard kernel/*.[ch] user/*.[ch] mkfs/*.c)
