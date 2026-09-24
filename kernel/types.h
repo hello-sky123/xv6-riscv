@@ -1,3 +1,4 @@
+// 对于没法自己用 C 写干净的可变参数 stdarg.h 才包含编译器头文件
 typedef unsigned int uint;
 typedef unsigned short ushort;
 typedef unsigned char uchar;
