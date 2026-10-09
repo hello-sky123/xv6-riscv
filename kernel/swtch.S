@@ -5,7 +5,12 @@
 # Save current registers in old. Load from new.	
 
 
+# 告诉汇编器和链接器，swtch是一个全局符号，可以被其他文件引用，以 . 开头的指令是给汇编器的元指令
 .globl swtch
+# 按 RISC-V 调用约定，函数的第一个参数通过 a0 寄存器传递，第二个参数通过 a1 寄存器传递
+# sd 指令（Store Doubleword）：将 64 位的寄存器数据，存入内存；第一部分 14 条指令把当前 CPU 里的 14
+# 个寄存器（属于当前线程，可能是某个进程，也可能是 scheduler），依次备份到 a0 所指的内存空间里
+# （p->context 或 c->context）
 swtch:
         sd ra, 0(a0)
         sd sp, 8(a0)

@@ -1,4 +1,12 @@
 // Saved registers for kernel context switches.
+// 当操作系统决定把 CPU 从进程 A 切换到进程 B 时，它必须把进程 A 的当前执行状态存档，然后把进程 B 之前的
+// 执行状态恢复出来，这个结构体就是存档点（实际上 xv6 不会在进程之间直接切换，而是经过当前 CPU 的
+// scheduler 中转：进程 A -> scheduler -> 进程 B）。上下文切换（swtch() 函数）被当成了一次普通的
+// C 函数调用，所以它只需要遵守 RISC-V 调用约定（calling convention），不需要保存全部寄存器。
+// RISC-V ABI 将寄存器分为两类：caller-saved 和 callee-saved。caller-saved（参数寄存器 a0-a7，
+// 临时寄存器 t0-t6），如果调用之后还要用到，编译器会在调用前自己把它们保存到当前栈上，所以 swtch 可以
+// 随意修改它们。callee-saved（保存寄存器 s0-s11，栈指针寄存器 sp）需要 swtch 自己保存和恢复。
+// ra 按 ABI 属于 caller-saved，swtch 保存它是因为 ret 会跳到 ra，它记录的是切换回来后从哪里继续执行。
 struct context {
   uint64 ra;
   uint64 sp;

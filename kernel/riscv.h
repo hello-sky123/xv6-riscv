@@ -337,10 +337,14 @@ r_sp()
 
 // read and write tp, the thread pointer, which xv6 uses to hold
 // this core's hartid (core number), the index into cpus[].
+// 使用内联汇编的原因是因为 C 语言没法直接访问某个特定的寄存器，只能借助内联汇编
 static inline uint64
 r_tp()
 {
   uint64 x;
+  // asm 告诉编译器后面是一条汇编指令，volatile 告诉编译器这条汇编有副作用，不能删除或合并
+  // mv 把 tp 寄存器里的值，赋值给 %0 这个占位符，: 后面是输出操作数，r：让编译器随便挑一个通用寄存器
+  // 来存放 %0，= 表示这个操作数只写（汇编只写入、不读取它原来的值），(x)：汇编执行完后，把这个寄存器的值赋值给变量 x
   asm volatile("mv %0, tp" : "=r"(x));
   return x;
 }
@@ -348,6 +352,8 @@ r_tp()
 static inline void
 w_tp(uint64 x)
 {
+  // 第一个冒号后面是输出操作数，第二个冒号后面是输入操作数，
+  // 执行汇编前编译器要先把 x 的值放到一个通用寄存器里，然后汇编指令把这个寄存器的值写入 tp 寄存器
   asm volatile("mv tp, %0" : : "r"(x));
 }
 
