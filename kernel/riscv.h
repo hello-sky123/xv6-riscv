@@ -5,16 +5,18 @@ static inline uint64
 r_mhartid()
 {
   uint64 x;
+  // mhartid 是 CSR（控制状态寄存器），不是通用寄存器，要用 csrr/csrw 这类专门的指令读写
   asm volatile("csrr %0, mhartid" : "=r"(x));
   return x;
 }
 
 // Machine Status Register, mstatus
+// 操作 mstatus 寄存器的 MPP 字段————记录并设置上一个特权级别，M=11, S=01, U=00
 
-#define MSTATUS_MPP_MASK (3L << 11) // previous mode.
-#define MSTATUS_MPP_M    (3L << 11)
-#define MSTATUS_MPP_S    (1L << 11)
-#define MSTATUS_MPP_U    (0L << 11)
+#define MSTATUS_MPP_MASK (3L << 11) // previous mode. 掩码：只抠出 MPP 两位
+#define MSTATUS_MPP_M    (3L << 11) // 机器模式，(11₂ = 3)
+#define MSTATUS_MPP_S    (1L << 11) // 监督模式，(01₂ = 1)
+#define MSTATUS_MPP_U    (0L << 11) // 用户模式，(00₂ = 0)
 
 static inline uint64
 r_mstatus()
@@ -33,6 +35,7 @@ w_mstatus(uint64 x)
 // machine exception program counter, holds the
 // instruction address to which a return from
 // exception will go.
+// mepc 寄存器里存的是 mret 之后要跳转的地址
 static inline void
 w_mepc(uint64 x)
 {
@@ -40,6 +43,7 @@ w_mepc(uint64 x)
 }
 
 // Supervisor Status Register, sstatus
+// 管 S 态的两件事：中断开没开（SIE/SPIE），以及陷入前处于哪个特权级（SPP）
 
 #define SSTATUS_SPP  (1L << 8) // Previous mode, 1=Supervisor, 0=User
 #define SSTATUS_SPIE (1L << 5) // Supervisor Previous Interrupt Enable
@@ -64,18 +68,25 @@ w_sstatus(uint64 x)
 static inline void
 s_sstatus(uint64 x)
 {
+  // 把 sstatus 中掩码 x 为 1 的那些位置 1，其他位不变，比如 intr_on() 用它打开 SIE。"rK" 约束：
+  // r 表示通用寄存器，K 表示 5 位立即数，如果 x 是 0~31 的常量，编译器会直接把它编码进指令（csrsi），
+  // 而不是先放到寄存器里。memory：告诉编译器这条指令可能读写任意内存，所以不能把前后的内存访问挪到
+  // 它的另一边；之前暂存在寄存器里、还没写回的内存数据要先写回，之后用到的内存数据要重新从内存读取
   __asm__ __volatile__("csrs sstatus, %0" ::"rK"(x) : "memory");
 }
 
 static inline void
 c_sstatus(uint64 x)
 {
+  // 把 sstatus 中掩码 x 为 1 的那些位清 0，其他位不变，比如 intr_off() 用它关闭 SIE
   __asm__ __volatile__("csrc sstatus, %0" ::"rK"(x) : "memory");
 }
 
 static inline uint64
 rc_sstatus(uint64 x)
 {
+  // 一条 csrrc 指令同时完成两件事：返回 sstatus 的旧值，并把掩码 x 为 1 的那些位清 0。读和清之间
+  // 不会被中断插进来。push_off() 用它关中断，并从旧值里取出原来的 SIE，记到 mycpu()->intena
   __asm__ __volatile__("csrrc %0, sstatus, %1" : "=r"(x) : "rK"(x) : "memory");
   return x;
 }
