@@ -92,6 +92,7 @@ rc_sstatus(uint64 x)
 }
 
 // Supervisor Interrupt Pending
+// sip 寄存器记录哪些 S 模式可见的中断当前处于挂起状态，也就是哪些中断事件正在等待处理
 static inline uint64
 r_sip()
 {
@@ -107,12 +108,13 @@ w_sip(uint64 x)
 }
 
 // Supervisor Interrupt Enable
-#define SIE_SEIE (1L << 9) // external
-#define SIE_STIE (1L << 5) // timer
+#define SIE_SEIE (1L << 9) // external，允许 S 态外部中断
+#define SIE_STIE (1L << 5) // timer，允许 S 态时钟中断
 static inline uint64
 r_sie()
 {
   uint64 x;
+  // sie 寄存器控制当前系统‘允许（Enable）’接收哪些特定类型的中断
   asm volatile("csrr %0, sie" : "=r"(x));
   return x;
 }
@@ -125,6 +127,8 @@ w_sie(uint64 x)
 
 // Machine-mode Interrupt Enable
 #define MIE_STIE (1L << 5) // supervisor timer
+// mie 寄存器是每一种中断源的使能位，M 态和 S 态的中断都在这里（比如 MIE_STIE 是 S 态时钟中断），
+// sie 是它对 S 态可见的那部分
 static inline uint64
 r_mie()
 {
@@ -157,6 +161,7 @@ r_sepc()
 }
 
 // Machine Exception Delegation
+// medeleg 寄存器决定哪些异常由 M 模式（Machine Mode）委托给 S 模式（Supervisor Mode）处理
 static inline uint64
 r_medeleg()
 {
@@ -188,6 +193,7 @@ w_mideleg(uint64 x)
 
 // Supervisor Trap-Vector Base Address
 // low two bits are mode.
+// stvec 寄存器指定处理器进入 S 模式（Supervisor Mode）陷阱处理程序时的入口地址，以及陷阱入口的分发模式
 static inline void
 w_stvec(uint64 x)
 {
@@ -203,32 +209,36 @@ r_stvec()
 }
 
 // Supervisor Timer Comparison Register
+// 读取当前内核设定的下一次闹钟什么时候响
 static inline uint64
 r_stimecmp()
 {
   uint64 x;
-  // asm volatile("csrr %0, stimecmp" : "=r" (x) );
-  asm volatile("csrr %0, 0x14d" : "=r"(x));
+  // 在 RISC-V 主板上，有一个永远在匀速递增的全局时钟计数器（通常叫 time 寄存器）。
+  // 而 stimecmp 寄存器，就是操作系统设定的“闹钟时间”
+  // asm volatile("csrr %0, stimecmp" : "=r"(x));
+  asm volatile("csrr %0, 0x14d" : "=r"(x)); // 0x14d 是 stimecmp 的 CSR 编号
   return x;
 }
 
 static inline void
 w_stimecmp(uint64 x)
 {
-  // asm volatile("csrw stimecmp, %0" : : "r" (x));
+  // asm volatile("csrw stimecmp, %0" : : "r"(x));
   asm volatile("csrw 0x14d, %0" : : "r"(x));
 }
 
 // Machine Environment Configuration Register
+// menvcfg 寄存器由 M 模式配置某些环境相关的硬件行为，并控制较低特权级能否使用部分可选的内存管理或其他架构功能
 
-#define MENVCFG_STCE (1L << 63)
-#define MENVCFG_ADUE (1L << 61)
+#define MENVCFG_STCE (1L << 63)  // 启用 Sstc 扩展，S 模式才能使用 stimecmp
+#define MENVCFG_ADUE (1L << 61)  // 访问页面时由硬件自动设置 PTE 的 A/D 位
 
 static inline uint64
 r_menvcfg()
 {
   uint64 x;
-  // asm volatile("csrr %0, menvcfg" : "=r" (x) );
+  // asm volatile("csrr %0, menvcfg" : "=r"(x));
   asm volatile("csrr %0, 0x30a" : "=r"(x));
   return x;
 }
@@ -236,17 +246,19 @@ r_menvcfg()
 static inline void
 w_menvcfg(uint64 x)
 {
-  // asm volatile("csrw menvcfg, %0" : : "r" (x));
+  // asm volatile("csrw menvcfg, %0" : : "r"(x));
   asm volatile("csrw 0x30a, %0" : : "r"(x));
 }
 
 // Physical Memory Protection
+// pmpcfg0 寄存器决定“这块内存允许怎样访问”
 static inline void
 w_pmpcfg0(uint64 x)
 {
   asm volatile("csrw pmpcfg0, %0" : : "r"(x));
 }
 
+// pmpaddr0 寄存器决定“保护哪块内存”
 static inline void
 w_pmpaddr0(uint64 x)
 {
