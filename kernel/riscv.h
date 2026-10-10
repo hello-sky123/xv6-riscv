@@ -437,13 +437,14 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PGSIZE  4096 // bytes per page
 #define PGSHIFT 12   // bits of offset within a page
 
+// 操作系统在分配内存时，只能给整数倍的页，如果你只申请 1 个字节，操作系统也得给你一整页
 #define PGROUNDUP(sz)  (((sz) + PGSIZE - 1) & ~(PGSIZE - 1))
 #define PGROUNDDOWN(a) (((a)) & ~(PGSIZE - 1))
 
-#define PTE_V (1L << 0) // valid
-#define PTE_R (1L << 1)
-#define PTE_W (1L << 2)
-#define PTE_X (1L << 3)
+#define PTE_V (1L << 0) // valid，为 0 时这条 PTE 无效，访问会触发缺页异常（换页、懒分配都基于这一点）
+#define PTE_R (1L << 1) // read（可读）
+#define PTE_W (1L << 2) // write（可写）
+#define PTE_X (1L << 3) // execute（可执行）
 #define PTE_U (1L << 4) // user can access
 
 // shift a physical address to the right place for a PTE.
@@ -451,15 +452,16 @@ typedef uint64 *pagetable_t; // 512 PTEs
 
 #define PTE2PA(pte) (((pte) >> 10) << 12)
 
-#define PTE_FLAGS(pte) ((pte) & 0x3FF)
+#define PTE_FLAGS(pte) ((pte) & 0x3FF) // 取出低 10 位标志位：V/R/W/X/U/G/A/D 和 2 位 RSW
 
 // extract the three 9-bit page table indices from a virtual address.
 #define PXMASK         0x1FF // 9 bits
 #define PXSHIFT(level) (PGSHIFT + (9 * (level)))
+// va 是 39 位的虚拟地址，level 是页表的层级（0、1、2），PX(level, va) 就是从 va 里抠出第 level 层页表的索引
 #define PX(level, va)  ((((uint64)(va)) >> PXSHIFT(level)) & PXMASK)
 
 // one beyond the highest possible virtual address.
 // MAXVA is actually one bit less than the max allowed by
 // Sv39, to avoid having to sign-extend virtual addresses
 // that have the high bit set.
-#define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
+#define MAXVA (1L << (9 + 9 + 9 + 12 - 1)) // 2^38，只用 Sv39 的低半部分，地址不需要符号扩展
