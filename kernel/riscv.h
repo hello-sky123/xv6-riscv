@@ -265,9 +265,13 @@ w_pmpaddr0(uint64 x)
   asm volatile("csrw pmpaddr0, %0" : : "r"(x));
 }
 
+// 用这两个宏来构造写进 satp 寄存器的值，satp 决定 CPU 用哪张页表、用什么分页模式
 // use riscv's sv39 page table scheme.
 #define SATP_SV39 (8L << 60)
 
+// pagetable 是物理内存地址，satp 的格式可划分为三段：1. 最高四位是模式位（MODE），决定分页模式；
+// 0 是 Bare，不翻译地址；8 是 Sv39，39 位虚拟地址；9 是 Sv48，48 位虚拟地址。2. 中间 16 位是 ASID
+// （地址空间 ID），xv6 不用，保持 0。3. 低 44 位是根页表的物理页号（PPN），即物理地址 >> 12
 #define MAKE_SATP(pagetable) (SATP_SV39 | (((uint64)pagetable) >> 12))
 
 // supervisor address translation and protection;
@@ -287,6 +291,7 @@ r_satp()
 }
 
 // Supervisor Trap Cause
+// 操作系统发生中断或发生异常时，它通过读取 scause 寄存器，来查明到底是谁、因为什么原因打断了 CPU 的执行
 static inline uint64
 r_scause()
 {
@@ -296,6 +301,7 @@ r_scause()
 }
 
 // Supervisor Trap Value
+// 当发生异常时，stval 寄存器会保存导致异常的地址或指令
 static inline uint64
 r_stval()
 {
@@ -305,6 +311,7 @@ r_stval()
 }
 
 // Machine-mode Counter-Enable
+// mcounteren 寄存器决定 S/U 模式能否访问某些计数器（cycle、time、instret）
 static inline void
 w_mcounteren(uint64 x)
 {
@@ -328,7 +335,7 @@ r_time()
   return x;
 }
 
-// enable device interrupts
+// enable device interrupts，异步中断
 static inline void
 intr_on()
 {
@@ -380,6 +387,7 @@ w_tp(uint64 x)
   asm volatile("mv tp, %0" : : "r"(x));
 }
 
+// ra 是 return address 寄存器，保存函数调用返回的地址
 static inline uint64
 r_ra()
 {
@@ -389,27 +397,38 @@ r_ra()
 }
 
 // flush the TLB.
+// 清空 CPU 内部的 TLB（地址转换缓存），强制 CPU 重新去物理内存中读取最新的页表映射关系
 static inline void
 sfence_vma()
 {
   // the zero, zero means flush all TLB entries.
+  // 页表存放在普通物理内存里，需要 TLB 来加速访问，切换页表时，旧的页表映射关系可能还在 TLB 里，
+  // 所以要清空 TLB，zero 是通用寄存器 x0，值恒为 0，sfence.vma 指令的两个参数都是 zero，表示清空所有 TLB 条目
   asm volatile("sfence.vma zero, zero" ::: "memory");
 }
 
 // fence for memory-mapped IO
+// 内存屏障：保证屏障之前的内存和设备 I/O 访问，在其他 CPU 和设备看来，都先于屏障之后的访问发生。
+// virtio_disk.c 用它确保描述符写进内存之后，才去通知设备
 static inline void
 io_fence()
 {
+  // iorw 的四个字母分别是：i 设备输入（I/O 读），o 设备输出（I/O 写），r 内存读，w 内存写。
+  // 前后都写 iorw，表示屏障前的这四类访问，都要排在屏障后的这四类访问之前
   asm volatile("fence iorw, iorw" ::: "memory");
 }
 
 // fence for icache
+// 指令屏障：让本 CPU 之后的取指令看到之前写进内存的代码（比如刚加载进来的程序），
+// 避免执行指令缓存里的旧内容
 static inline void
 icache_fence()
 {
   asm volatile("fence.i" ::: "memory");
 }
 
+// page table entry，指针天然可以作为数组来使用，把一个指向 4KB 内存页首地址的指针转换成 pagetable_t 后
+// 它自然而然就变成了一个拥有 512 个元素的数组 pagetable[0] 到 pagetable[511]
 typedef uint64 pte_t;
 typedef uint64 *pagetable_t; // 512 PTEs
 
