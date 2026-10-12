@@ -8,6 +8,7 @@ void main();
 void timerinit();
 
 // entry.S needs one stack per CPU.
+// 指定变量的内存对齐要求为 16 字节
 __attribute__((aligned(16))) char stack0[4096 * NCPU];
 
 // entry.S jumps here in machine mode on stack0.
