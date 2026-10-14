@@ -8,6 +8,7 @@
 #include "proc.h"
 #include "defs.h"
 
+// 在 C 里，整数常量 0 赋值给指针时，就是空指针，不用 NULL 是因为它没有包含 stddef.h 头文件
 void
 initlock(struct spinlock *lk, char *name)
 {
@@ -21,7 +22,9 @@ initlock(struct spinlock *lk, char *name)
 void
 acquire(struct spinlock *lk)
 {
+  // 获取锁之前，先关中断
   push_off(); // disable interrupts to avoid deadlock.
+  // 检查是否重复获取
   if (holding(lk))
     panic("acquire");
 
@@ -34,6 +37,20 @@ acquire(struct spinlock *lk)
   // the C compiler and the processor to not move loads or stores
   // past this point, to ensure that the critical section's memory
   // references happen strictly after the lock is acquired.
+  /*
+   * 自旋抢锁，__atomic_exchange_n 是 GCC 和 Clang 提供的原子操作内建函数，用于原子地读取一个
+   * 变量的旧值，并将其替换为新值，函数原型为：
+   * type __atomic_exchange_n(
+   *     type *ptr,
+   *     type val,
+   *     int memorder
+   * );
+   * ptr：指向要操作的变量
+   * val：要写入的新值
+   * memorder：内存顺序参数，__ATOMIC_ACQUIRE 表示之后的读写不能提前到它之前
+   *
+   * 旧值不为 0，说明锁被别人占着，回到开头重试
+   */
   while (__atomic_exchange_n(&lk->locked, 1, __ATOMIC_ACQUIRE) != 0)
     ;
 
@@ -45,9 +62,11 @@ acquire(struct spinlock *lk)
 void
 release(struct spinlock *lk)
 {
+  // 检查是否持有锁
   if (!holding(lk))
     panic("release");
 
+  // 清除持有者
   lk->cpu = 0;
 
   // Release the lock, equivalent to lk->locked = 0.
@@ -70,8 +89,15 @@ release(struct spinlock *lk)
   //
   // On RISC-V, this generates a fence instruction before the store:
   //   fence rw,w
+  /*
+   * 释放锁：release 语义的存储
+   * release 语义的意思是：临界区里所有的读写，都必须在这次写入之前完成
+   * 上面英文注释写的是 fence rw,w + sw，具体指令取决于编译器版本，xv6-tools 里的 gcc
+   * 实际生成的是 fence iorw,ow + amoswap.w zero,zero,(s1)，效果相同
+   */
   __atomic_store_n(&lk->locked, 0, __ATOMIC_RELEASE);
 
+  // 释放锁之后，再恢复中断状态（是否真的开中断，由 pop_off 的嵌套计数和 intena 决定）
   pop_off();
 }
 
@@ -89,14 +115,19 @@ holding(struct spinlock *lk)
 // it takes two pop_off()s to undo two push_off()s.  Also, if interrupts
 // are initially off, then push_off, pop_off leaves them off.
 
+// 关闭当前 CPU 的中断，支持嵌套：每调用一次，计数加 1。只有最外层的那次调用会记下关中断之前的状态
+// 等到 pop_off() 把计数减到 0 时，再按这个状态决定要不要重新开中断
 void
 push_off(void)
 {
   // disable interrupts to prevent an involuntary context
   // switch while using mycpu().
+  // 读旧状态，同时关中断
   uint64 flags = rc_sstatus(SSTATUS_SIE);
+  // flags & SSTATUS_SIE 的结果是 0 或 2，两个 !! 把它变成 0 或 1
   int old = !!(flags & SSTATUS_SIE);
 
+  // noff == 0 说明这是最外层的 push_off()，old 就是“进入临界区之前”中断的真实状态，存进 intena
   if (mycpu()->noff == 0)
     mycpu()->intena = old;
   mycpu()->noff += 1;
@@ -105,12 +136,16 @@ push_off(void)
 void
 pop_off(void)
 {
+  // 取当前 CPU
   struct cpu *c = mycpu();
+  // 检查中断是否真的关着
   if (intr_get())
     panic("pop_off - interruptible");
+  // 检查是否多调用了一次
   if (c->noff < 1)
     panic("pop_off");
   c->noff -= 1;
+  // 如果这是最外层的 pop_off()，就按 intena 里记录的状态决定要不要开中断
   if (c->noff == 0 && c->intena)
     intr_on();
 }

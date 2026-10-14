@@ -4,6 +4,7 @@
 #include "riscv.h"
 #include "defs.h"
 
+// hart0 和其他 hart 之间的一个“初始化完成”标志
 volatile static int started = 0;
 
 // start() jumps here in supervisor mode on all CPUs.
