@@ -332,13 +332,13 @@ freewalk(pagetable_t pagetable)
 
 // Free user memory pages,
 // then free page-table pages.
-// 释放一整张用户页表：先释放 [0, sz] 范围内所有用户页对应的物理页，再用 freewalk 释放页表页本身
+// 释放一整张用户页表：先释放 [0, sz) 范围内所有用户页对应的物理页，再用 freewalk 释放页表页本身
 // 调用之后，这张页表就不能再用了
 void
 uvmfree(pagetable_t pagetable, uint64 sz)
 {
   if (sz > 0)
-    // 删掉叶子映射，并释放物理页 
+    // 删掉叶子映射，并释放物理页
     uvmunmap(pagetable, 0, PGROUNDUP(sz) / PGSIZE, 1);
   // 释放页表页
   freewalk(pagetable);
