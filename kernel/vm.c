@@ -350,6 +350,8 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
+// 在 fork 时把父进程的用户内存完整复制一份给子进程。它逐页检查 [0, sz)：凡是父进程已经映射的页，
+// 就新分配一页物理内存，把内容拷进去，再按相同的权限映射到子进程页表的同一个虚拟地址
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
@@ -359,10 +361,12 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   char *mem;
 
   for (i = 0; i < sz; i += PGSIZE) {
+    // 跳过没有映射的页
     if ((pte = walk(old, i, 0)) == 0)
       continue; // page table entry hasn't been allocated
     if ((*pte & PTE_V) == 0)
       continue; // physical page hasn't been allocated
+    // 复制一页
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if ((mem = kalloc()) == 0)
@@ -375,6 +379,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   }
   return 0;
 
+  // 跳到这里时，[0, i) 已经复制好、映射进了子进程页表，使用 uvmunmap 取消映射，并释放物理页
 err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
@@ -382,6 +387,8 @@ err:
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
+// 把 va 所在页的 PTE 里的 PTE_U 位清掉。这一页仍然映射着（PTE_V 还是 1），只是用户态不能再
+// 访问它。exec 用它在用户栈下面做一个保护页
 void
 uvmclear(pagetable_t pagetable, uint64 va)
 {
@@ -396,6 +403,9 @@ uvmclear(pagetable_t pagetable, uint64 va)
 // Copy from kernel to user.
 // Copy len bytes from src to virtual address dstva in a given page table.
 // Return 0 on success, -1 on error.
+// 把内核内存里 src 开始的 len 个字节，复制到用户地址空间的虚拟地址 dstva。用户地址不能直接当
+// 指针使用，所以它按页查用户页表，找到这一页的物理地址后再复制。成功返回 0，任何一页不合法都返回
+// -1。系统调用要把结果交给用户程序时，用的就是它
 int
 copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
 {
@@ -403,10 +413,12 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
   pte_t *pte;
 
   while (len > 0) {
+    // 找到这一页的起点
     va0 = PGROUNDDOWN(dstva);
     if (va0 >= MAXVA)
       return -1;
 
+    // 查物理地址，没有映射就补上
     pa0 = walkaddr(pagetable, va0);
     if (pa0 == 0) {
       if ((pa0 = vmfault(pagetable, psz, va0, 0)) == 0) {
@@ -414,16 +426,19 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
       }
     }
 
+    // 检查这一页是否可写
     pte = walk(pagetable, va0, 0);
     // forbid copyout over read-only user text pages.
     if ((*pte & PTE_W) == 0)
       return -1;
 
+    // 计算这一页能复制多少，然后复制
     n = PGSIZE - (dstva - va0);
     if (n > len)
       n = len;
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
+    // 移到下一页
     len -= n;
     src += n;
     dstva = va0 + PGSIZE;
@@ -434,6 +449,7 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
 // Copy from user to kernel.
 // Copy len bytes to dst from virtual address srcva in a given page table.
 // Return 0 on success, -1 on error.
+// 把用户地址空间里 srcva 开始的 len 个字节，复制到内核内存 dst
 int
 copyin(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva, uint64 len)
 {
@@ -463,6 +479,8 @@ copyin(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva, uint64 len)
 // Copy bytes to dst from virtual address srcva in a given page table,
 // until a '\0', or max.
 // Return 0 on success, -1 on error.
+// 把用户空间里一个以 '\0' 结尾的字符串复制到内核缓冲区 dst，最多复制 max 个字节，包括结尾的 '\0'
+// 在 max 个字节内遇到 '\0' 就返回 0；字符串太长或者地址非法，就返回 -1
 int
 copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
           uint64 max)
@@ -470,6 +488,7 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
   uint64 n, va0, pa0;
   int got_null = 0;
 
+  // 每次循环处理一页
   while (got_null == 0 && max > 0) {
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
@@ -478,10 +497,12 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
         return -1;
       }
     }
+    // 这一页最多能复制的字节数：既不能超出这一页，也不能超出剩下的 max
     n = PGSIZE - (srcva - va0);
     if (n > max)
       n = max;
 
+    // 内层循环，逐字节复制
     char *p = (char *)(pa0 + (srcva - va0));
     while (n > 0) {
       if (*p == '\0') {
@@ -510,6 +531,8 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
 // that was lazily allocated in sys_sbrk().
 // returns 0 if va is invalid or already mapped, or if
 // out of physical memory, and physical address if successful.
+// 懒分配的“补页”函数，如果 va 在进程的内存范围 [0, psz) 以内，但所在页还没有映射，它就分配
+// 一页物理内存、清零，再映射成可读写的用户页，返回这一页的物理地址，其余情况一律返回 0
 uint64
 vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
 {
@@ -518,9 +541,11 @@ vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
   if (va >= psz)
     return 0;
   va = PGROUNDDOWN(va);
+  // 检查是否已映射
   if (ismapped(pagetable, va)) {
     return 0;
   }
+  // 分配、清零、映射
   mem = (uint64)kalloc();
   if (mem == 0)
     return 0;
