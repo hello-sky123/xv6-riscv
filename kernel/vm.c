@@ -13,6 +13,8 @@
  */
 pagetable_t kernel_pagetable;
 
+// C 编译器要求先声明后使用，所以要用 extern 告诉它“这个名字是在别处定义的”，地址交给链接器去填
+// 这两个符号都只是一个地址，地址上并没有一个真正的 C 变量，因此声明为数组（数组名本身就代表地址）
 extern char etext[]; // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
@@ -24,7 +26,7 @@ kvmmake(void)
 {
   pagetable_t kpgtbl;
 
-  // 分配根页表，必须清零
+  // 分配一个物理页作为根页表，必须清零
   kpgtbl = (pagetable_t)kalloc();
   memset(kpgtbl, 0, PGSIZE);
 
@@ -35,6 +37,8 @@ kvmmake(void)
   kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
   // PLIC
+  // 页表最小只能按页映射，RISC-V PLIC 规范给这个设备预留了 64MB 的地址窗口，xv6 直接按规范把整个
+  // 窗口都映射了
   kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
 
   // map kernel text executable and read-only.
