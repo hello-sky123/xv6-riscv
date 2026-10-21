@@ -37,6 +37,7 @@ main()
       ;
 
     printk("hart %d starting\n", cpuid());
+    // 每个 hart 各自有一份 satp 和 TLB，但是共用一张内核页表（所以 kvminit 只调用一次）
     kvminithart();  // turn on paging
     trapinithart(); // install kernel trap vector
     plicinithart(); // ask PLIC for device interrupts

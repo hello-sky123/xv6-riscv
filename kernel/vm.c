@@ -42,6 +42,7 @@ kvmmake(void)
   kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
 
   // map kernel text executable and read-only.
+  // 将内核代码段恒等映射进内核页表
   kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
 
   // map kernel data and the physical RAM we'll make use of.
@@ -77,15 +78,19 @@ kvminit(void)
 
 // Switch the current CPU's h/w page table register to
 // the kernel's page table, and enable paging.
+// 让当前这个 CPU 打开分页：把内核页表的地址写进 satp，前后各执行一次 sfence.vma
 void
 kvminithart()
 {
   // wait for any previous writes to the page table memory to finish.
+  // 让页表的写入先完成
   sfence_vma();
 
+  // 打开分页
   w_satp(MAKE_SATP(kernel_pagetable));
 
   // flush stale entries from the TLB.
+  // 清空之前的 TLB
   sfence_vma();
 }
 
@@ -240,9 +245,10 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     panic("uvmunmap: not aligned");
 
   for (a = va; a < va + npages * PGSIZE; a += PGSIZE) {
-    // 跳过没有映射的页，第一种：中间级页表不存在，第二种：中间级页表存在，但这一页没有映射
+    // walk 返回 0：L2 或者 L1 的某一项无效，L0 页表不存在
     if ((pte = walk(pagetable, a, 0)) == 0) // leaf page table entry allocated?
       continue;
+    // L0 页表已经存在，判断这一个 pte 是否有效
     if ((*pte & PTE_V) == 0) // has physical page been allocated?
       continue;
     // 可选地释放物理页
@@ -342,7 +348,7 @@ void
 uvmfree(pagetable_t pagetable, uint64 sz)
 {
   if (sz > 0)
-    // 删掉叶子映射，并释放物理页
+    // 删掉叶子映射
     uvmunmap(pagetable, 0, PGROUNDUP(sz) / PGSIZE, 1);
   // 释放页表页
   freewalk(pagetable);
