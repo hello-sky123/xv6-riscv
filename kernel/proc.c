@@ -29,31 +29,46 @@ struct spinlock wait_lock;
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
+// 给 64 个进程槽各分配一页物理内存作为内核栈，并把它映射到内核页表中，权限是可读写。每个栈下面
+// 都留一页不映射，作为保护页
 void
 proc_mapstacks(pagetable_t kpgtbl)
 {
   struct proc *p;
 
   for (p = proc; p < &proc[NPROC]; p++) {
+    // 启动阶段，内存一定够用，分配失败说明出了大问题，所以直接 panic，这一页没有清零，因为栈
+    // 不需要初始值，使用前函数会先压栈写入，再读出来
     char *pa = kalloc();
     if (pa == 0)
       panic("kalloc");
+    // 每个进程占 2 页虚拟地址：上面一页映射成栈，下面一页不映射
     uint64 va = KSTACK((int)(p - proc));
+    // 建立虚拟地址和物理地址的映射关系（不是恒等映射）
     kvmmap(kpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
   }
 }
 
 // initialize the proc table.
+// 初始化进程表 proc[]，在启动时由 hart0 调用一次。主要做三件事：初始化两把全局锁，把 64 个
+// 进程槽都标记为空闲，并给每个槽记下它的内核栈地址。它不分配任何内存，也不建立映射
 void
 procinit(void)
 {
   struct proc *p;
 
+  // pid_lock 保护 nextpid。多个 CPU 同时创建进程时，靠它保证每个进程拿到不同的 pid
   initlock(&pid_lock, "nextpid");
+  // wait_lock 保护所有进程的 parent 字段，必须先拿到 wait_lock 锁，再拿任何 p->lock
   initlock(&wait_lock, "wait_lock");
+  // 遍历 64 个进程槽
   for (p = proc; p < &proc[NPROC]; p++) {
+    // 每个进程有自己的锁，保护 state、chan、killed、xstate、pid 这些会被其他 CPU 访问的字段，
+    // 锁的名称都相同
     initlock(&p->lock, "proc");
+    // 表示这个槽空着，allocproc 可以拿来用
     p->state = UNUSED;
+    // 记下这个槽的内核栈虚拟地址
     p->kstack = KSTACK((int)(p - proc));
   }
 }
