@@ -76,6 +76,8 @@ procinit(void)
 // Must be called with interrupts disabled,
 // to prevent race with process being moved
 // to a different CPU.
+// 返回当前 CPU（hart）的编号，也就是 tp 寄存器的值。调用时必须关着中断，否则拿到的编号可能
+// 已经过时
 int
 cpuid()
 {
@@ -85,6 +87,7 @@ cpuid()
 
 // Return this CPU's cpu struct.
 // Interrupts must be disabled.
+// 返回当前 CPU 对应的 struct cpu 指针，也需要关着中断
 struct cpu *
 mycpu(void)
 {
@@ -94,6 +97,7 @@ mycpu(void)
 }
 
 // Return the current struct proc *, or zero if none.
+// 返回当前 CPU 上正在运行的进程，如果当前 CPU 没有正在运行的进程，返回 0
 struct proc *
 myproc(void)
 {
@@ -104,12 +108,15 @@ myproc(void)
   return p;
 }
 
+// 分配一个新的进程号
 int
 allocpid()
 {
   int pid;
 
+  // 获取自旋锁
   acquire(&pid_lock);
+  // nextpid 是全局变量，初始值是 1，所以 pid 从 1 开始
   pid = nextpid;
   nextpid = nextpid + 1;
   release(&pid_lock);
@@ -121,14 +128,18 @@ allocpid()
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
 // If there are no free procs, or a memory allocation fails, return 0.
+// 从进程表里找一个空闲的槽（UNUSED），把它初始化成“能在内核态里运行”的状态，然后持有 p->lock
+// 返回，找不到槽，或者内存分配失败时，返回 0
 static struct proc *
 allocproc(void)
 {
   struct proc *p;
 
+  // 找空槽：检查和占用必须在锁里完成
   for (p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
     if (p->state == UNUSED) {
+      // 找到以后用 goto found 跳出循环，这时锁还没有释放
       goto found;
     } else {
       release(&p->lock);
@@ -137,10 +148,12 @@ allocproc(void)
   return 0;
 
 found:
+  // 分配 pid，标记为 USED
   p->pid = allocpid();
   p->state = USED;
 
   // Allocate a trapframe page.
+  // 分配 trapframe，单独占一页物理内存，保存用户态和内核态之间切换时的用户寄存器现场
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
     freeproc(p);
     release(&p->lock);
@@ -148,6 +161,7 @@ found:
   }
 
   // An empty user page table.
+  // 建用户页表
   p->pagetable = proc_pagetable(p);
   if (p->pagetable == 0) {
     freeproc(p);
@@ -157,22 +171,30 @@ found:
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
+  // 设置 context，新进程从 forkret 开始运行
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // 返回时还持有锁，原因是调用者还要继续初始化：kfork 要复制内存、复制打开的文件、设置 parent，
+  // userinit 要设置 cwd。全部做完后，才把 state 修改为 RUNNABLE，再释放锁。这样，其他 CPU
+  // 就不会看到一个初始化到一半的进程
   return p;
 }
 
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
+// 回收一个进程槽：释放 trapframe 页和整张用户页表（连同用户内存），把记录进程状态的字段清零，
+// 最后把 state 设回 UNUSED，让 allocproc 可以再次使用这个槽。调用时需要持有 p->lock
 static void
 freeproc(struct proc *p)
 {
+  // 释放 trapframe，之前分配时，trapframe 是单独分配的一页，所以这里也要单独释放
   if (p->trapframe)
     kfree((void *)p->trapframe);
-  p->trapframe = 0;
+  p->trapframe = 0; // 指针置空
+  // 释放页表和用户内存
   if (p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -187,6 +209,8 @@ freeproc(struct proc *p)
 
 // Create a user page table for a given process, with no user memory,
 // but with trampoline and trapframe pages.
+// 给进程 p 创建一张新的用户页表。这张页表里还没有任何用户内存，只映射了两页：trampoline 和
+// 这个进程的 trapframe，而且都放在用户地址空间的最顶端。成功时返回页表，失败时先释放已分配的资源，再返回 0
 pagetable_t
 proc_pagetable(struct proc *p)
 {
@@ -201,6 +225,7 @@ proc_pagetable(struct proc *p)
   // at the highest user virtual address.
   // only the supervisor uses it, on the way
   // to/from user space, so not PTE_U.
+  // 映射 trampoline
   if (mappages(pagetable, TRAMPOLINE, PGSIZE, (uint64)trampoline,
                PTE_R | PTE_X) < 0) {
     uvmfree(pagetable, 0);
@@ -209,6 +234,8 @@ proc_pagetable(struct proc *p)
 
   // map the trapframe page just below the trampoline page, for
   // trampoline.S.
+  // 映射 trapframe
+  // 这两页都是给 trampoline.S 用的，用于用户态和内核态之间切换
   if (mappages(pagetable, TRAPFRAME, PGSIZE, (uint64)(p->trapframe),
                PTE_R | PTE_W) < 0) {
     uvmunmap(pagetable, TRAMPOLINE, 1, 0);
@@ -230,13 +257,17 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
 }
 
 // Set up first user process.
+// 创建第一个进程，也就是之后的 init 进程（pid 1）。它只做最少的准备：分配一个进程槽、把当前目录
+// 设为根目录、标记为可运行。这时这个进程还没有任何用户程序，加载 /init 是它第一次被调度、运行到
+// forkret 时才做的。它在 main() 里由 hart 0 调用，是全局初始化的最后一步
 void
 userinit(void)
 {
   struct proc *p;
 
+  // 拿到一个进程槽，这时进程表全是空的，所以拿到的一定是 proc[0]，pid 是 1
   p = allocproc();
-  initproc = p;
+  initproc = p; // 记下这个进程，其他进程退出时，会把子进程过继给它（见 reparent）
 
   p->cwd = namei("/");
 
@@ -247,6 +278,8 @@ userinit(void)
 
 // Grow or shrink user memory by n bytes.
 // Return 0 on success, -1 on failure.
+// 将当前进程的用户内存扩大或缩小 n 个字节：n > 0 时用 uvmalloc 立即分配并映射新页，n < 0 时
+// 用 uvmdealloc 释放末尾的页，最后更新 p->sz。成功返回 0，失败返回 -1
 int
 growproc(int n)
 {
@@ -255,9 +288,11 @@ growproc(int n)
 
   sz = p->sz;
   if (n > 0) {
+    // 检查上限，用户内存从 0 开始往上长，最顶端是 TRAPFRAME 和 TRAMPOLINE
     if (sz + n > TRAPFRAME) {
       return -1;
     }
+    // uvmalloc 映射的页固定有 R | U，这里再加上 W，堆是数据，所以没有 X
     if ((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
       return -1;
     }
@@ -270,19 +305,24 @@ growproc(int n)
 
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
+// 创建当前进程的子进程，子进程是父进程的一份副本：用户内存、用户寄存器、打开的文件、当前目录、
+// 进程名都复制过去。父进程拿到的是子进程的 pid，子进程从 fork 返回时拿到的是 0
 int
 kfork(void)
 {
   int i, pid;
+  // p 是父进程，np 是子进程
   struct proc *np;
   struct proc *p = myproc();
 
   // Allocate process.
+  // 分配进程槽
   if ((np = allocproc()) == 0) {
     return -1;
   }
 
   // Copy user memory from parent to child.
+  // 复制用户内存
   if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) {
     freeproc(np);
     release(&np->lock);
@@ -291,23 +331,28 @@ kfork(void)
   np->sz = p->sz;
 
   // copy saved user registers.
+  // 复制用户寄存器：结构体整体赋值，把父进程 trapframe 的 288 字节全部复制过来，所以子进程回到
+  // 用户态时，所有寄存器都和父进程一样
   *(np->trapframe) = *(p->trapframe);
 
   // Cause fork to return 0 in the child.
-  np->trapframe->a0 = 0;
+  np->trapframe->a0 = 0; // a0 存放返回值，所以子进程看到的 fork 返回值是 0
 
   // increment reference counts on open file descriptors.
+  // 共享打开的文件和当前目录
   for (i = 0; i < NOFILE; i++)
     if (p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // 复制进程名
   safestrcpy(np->name, p->name, sizeof(p->name));
 
-  pid = np->pid;
+  pid = np->pid; // pid 必须要在锁释放前读出来
 
   release(&np->lock);
 
+  // 设置父进程，parent 字段受 wait_lock 保护，先获取锁
   acquire(&wait_lock);
   np->parent = p;
   release(&wait_lock);
@@ -321,6 +366,10 @@ kfork(void)
 
 // Pass p's abandoned children to init.
 // Caller must hold wait_lock.
+// 在进程 p 退出时，把 p 的所有子进程过继给 init 进程：凡是 parent == p 的进程，都把 parent 改
+// 成 initproc，并唤醒 init。调用者必须持有 wait_lock
+// 进程退出以后不会马上消失，而是变成 ZOMBIE，等父进程调用 wait 来回收。回收时 kwait 才会调用
+// freeproc，把槽设为 UNUSED
 void
 reparent(struct proc *p)
 {
