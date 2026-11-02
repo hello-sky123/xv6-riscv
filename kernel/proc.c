@@ -386,15 +386,20 @@ reparent(struct proc *p)
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait().
+// 让当前进程退出，并且永远不会返回。它先关闭所有打开的文件、放掉当前目录，再把子进程过继给 init，
+// 唤醒父进程，最后把自己设成 ZOMBIE，切换到 scheduler，从此不再运行。它不释放用户内存、页表
+// 和 trapframe。这些要等到父进程调用 wait 时，由 kwait 里的 freeproc 来回收
 void
 kexit(int status)
 {
   struct proc *p = myproc();
 
+  // init 不能退出
   if (p == initproc)
     panic("init exiting");
 
   // Close all open files.
+  // 关闭文件、放掉当前目录（不持有任何锁）
   for (int fd = 0; fd < NOFILE; fd++) {
     if (p->ofile[fd]) {
       struct file *f = p->ofile[fd];
@@ -404,6 +409,7 @@ kexit(int status)
   }
 
   begin_op();
+  // iput 可能要写磁盘（释放 inode），文件系统的修改必须要放在一次日志事务里
   iput(p->cwd);
   end_op();
   p->cwd = 0;
@@ -411,6 +417,7 @@ kexit(int status)
   acquire(&wait_lock);
 
   // Give any children to init.
+  // 持有 wait_lock，过继子进程、唤醒父进程
   reparent(p);
 
   // Parent might be sleeping in wait().
@@ -418,6 +425,7 @@ kexit(int status)
 
   acquire(&p->lock);
 
+  // 记录退出码，变成 ZOMBIE
   p->xstate = status;
   p->state = ZOMBIE;
 
@@ -430,6 +438,10 @@ kexit(int status)
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
+// 让当前进程等待任意一个子进程退出。找到一个已经是 ZOMBIE 的子进程后，它会把子进程的退出码写到
+// 用户地址 addr，用 freeproc 回收这个子进程，然后返回子进程的 pid。如果没有任何子进程，或者
+// 当前进程已经被 kill，就返回 -1。如果有子进程但还没有退出，它就睡眠，等子进程在 kexit 里将
+// 它唤醒后再查一遍
 int
 kwait(uint64 addr)
 {
@@ -437,12 +449,16 @@ kwait(uint64 addr)
   int havekids, pid;
   struct proc *p = myproc();
 
+  // 先拿 wait_lock，它保护所有进程的 parent 字段。持有它，扫描期间子进程就无法在 kexit 里
+  // 完成退出，也不会有 reparent 改动父子关系
   acquire(&wait_lock);
 
   for (;;) {
     // Scan through table looking for exited children.
     havekids = 0;
+    // struct proc 里没有子进程列表，只能把 64 个槽全扫一遍
     for (pp = proc; pp < &proc[NPROC]; pp++) {
+      // 如果 pp 是 p 的子进程，就检查它的状态
       if (pp->parent == p) {
         // make sure the child isn't still in exit() or swtch().
         acquire(&pp->lock);
@@ -451,6 +467,7 @@ kwait(uint64 addr)
         if (pp->state == ZOMBIE) {
           // Found one.
           pid = pp->pid;
+          // 将子进程的退出码写到用户地址 addr
           if (addr != 0 &&
               copyout(p->pagetable, p->sz, addr, (char *)&pp->xstate,
                       sizeof(pp->xstate)) < 0) {
@@ -469,12 +486,14 @@ kwait(uint64 addr)
     }
 
     // No point waiting if we don't have any children.
+    // 没有子进程或者自己已经被 kill，就返回 -1
     if (!havekids || killed(p)) {
       release(&wait_lock);
       return -1;
     }
 
     // Wait for a child to exit.
+    // 睡眠：等子进程退出
     sleep_prepare(p); //DOC: wait-sleep
     release(&wait_lock);
     sleep();
@@ -608,6 +627,7 @@ forkret(void)
 }
 
 // Register current process as waiting for wakeups on chan.
+// 把当前进程登记为正在等待 chan 上的唤醒，也就是在持有 p->lock 时把 p->chan 设为 chan
 void
 sleep_prepare(void *chan)
 {
@@ -623,6 +643,9 @@ sleep_prepare(void *chan)
 // Put the thread to sleep.  Assumes sleep_prepare() was called before.
 // If the channel registered by sleep_prepare() has been woken up in
 // the meantime, do not go to sleep, and instead return immediately.
+// sleep() 让当前进程真正睡下去：如果 p->chan 还不是 0，也就是登记以后还没有被唤醒，就把状态
+// 设成 SLEEPING，调用 sched() 切到 scheduler。如果 p->chan 已经是 0，说明登记以后、睡下
+// 之前，唤醒已经发生了，就直接返回，不睡
 void
 sleep(void)
 {
