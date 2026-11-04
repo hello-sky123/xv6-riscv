@@ -508,12 +508,16 @@ kwait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+// scheduler() 是每个 CPU 上的调度循环，永远不会返回。它不停地扫描进程表，找到一个 RUNNABLE
+// 的进程，就用 swtch 切过去运行。那个进程让出 CPU 时，会再 swtch 回到这里，循环接着往下找。一轮
+// 扫描下来一个可运行的进程都没有，就执行 wfi 停下来等中断
 void
 scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
 
+  // 每个 CPU 核心（struct cpu）都有一个专属的调度器线程
   c->proc = 0;
   for (;;) {
     // The most recent process to run may have had interrupts
@@ -521,11 +525,19 @@ scheduler(void)
     // processes are waiting. Then turn them back off
     // to avoid a possible race between an interrupt
     // and wfi.
+    // 为什么要开：刚切回来时中断是关着的，如果所有进程都在睡眠、等磁盘或时钟中断来唤醒，而 scheduler
+    // 一直关着中断空转，就没有人能够唤醒它们。开一下，让已经挂起的中断有机会被处理
     intr_on();
+    // 为什么又关：后面找不到进程时要执行 wfi。如果中断开着，中断可能正好在“扫描完、发现没有进程”和“
+    // 执行 wfi”之间到来，被处理掉以后，wfi 就要一直等到下一个中断才醒，白白多等一轮
     intr_off();
 
     int found = 0;
+    // 找到一个 RUNNABLE 的进程
     for (p = proc; p < &proc[NPROC]; p++) {
+      // state 受 p->lock 保护，必须先拿锁再检查。多个 CPU 的 scheduler 同时扫描同一张进程表，
+      // 有了锁，同一个进程只会被一个 CPU 选中。这是最简单的轮转调度：没有优先级，从 proc[0] 扫到
+      // proc[63]，遇到 RUNNABLE 就运行它。等它让出 CPU 后，从下一个槽接着扫
       acquire(&p->lock);
       if (p->state == RUNNABLE) {
         // Switch to chosen process.  It is the process's job
@@ -533,9 +545,12 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        // scheduler 也是一个线程，swtch 把 scheduler 当前的寄存器存进 c->context，再从
+        // p->context 恢复进程的寄存器，然后 ret，带着 p->lock 切换
         swtch(&c->context, &p->context);
 
         // Don't re-enable interrupts on release.
+        // 切回来以后把 intena 设为 0，这样下面 release(&p->lock) 时不会打开中断
         mycpu()->intena = 0;
 
         // Process is done running for now.
@@ -547,6 +562,7 @@ scheduler(void)
     }
     if (found == 0) {
       // nothing to run; stop running on this core until an interrupt.
+      // 让 CPU 暂停执行，直到有中断挂起
       asm volatile("wfi");
     }
   }
@@ -559,18 +575,25 @@ scheduler(void)
 // be proc->intena and proc->noff, but that would
 // break in the few places where a lock is held but
 // there's no process.
+// 让当前进程的内核线程主动让出 CPU，切换到这个 CPU 的 scheduler。它只做三件事：检查调用条件、调用
+// swtch、在切换前后保存和恢复 intena。调用者要先把 p->state 改成某个不是 RUNNING 的状态，sched()
+// 本身不决定进程接下来是什么状态
 void
 sched(void)
 {
   int intena;
   struct proc *p = myproc();
 
+  // 检查是否持有 p->lock
   if (!holding(&p->lock))
     panic("sched p->lock");
+  // 只能持有这一把锁
   if (mycpu()->noff != 1)
     panic("sched locks");
+  // 状态不能是 RUNNING
   if (p->state == RUNNING)
     panic("sched RUNNING");
+  // 中断必须是关着的
   if (intr_get())
     panic("sched interruptible");
 
@@ -580,6 +603,8 @@ sched(void)
 }
 
 // Give up the CPU for one scheduling round.
+// yield() 让当前进程主动让出一轮 CPU：把自己设成 RUNNABLE，调用 sched() 切到 scheduler。它不睡眠，
+// 不等待任何条件，scheduler 下次扫描到它时就会让它接着运行
 void
 yield(void)
 {
@@ -592,6 +617,10 @@ yield(void)
 
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
+// 每个新进程的内核线程第一次运行时执行的函数。allocproc 把 context.ra 设成了 forkret，所以
+// scheduler 第一次 swtch 到这个进程时，ret 会跳到这里。它做三件事：释放 scheduler 持有的
+// p->lock；如果是系统的第一个进程，就初始化文件系统并加载 /init；最后跳进 trampoline 里的
+// userret，返回到用户态。它不会返回，因为最后跳进的 userret 以 sret 结束
 void
 forkret(void)
 {
@@ -602,6 +631,7 @@ forkret(void)
   // Still holding p->lock from scheduler.
   release(&p->lock);
 
+  // 以原子且带有获取内存序的方式读取变量的值
   if (__atomic_load_n(&first, __ATOMIC_ACQUIRE)) {
     // File system initialization must be run in the context of a
     // regular process (e.g., because it calls sleep), and thus cannot
@@ -660,6 +690,9 @@ sleep(void)
 }
 
 // Wake up all processes sleeping on channel chan.
+// 唤醒所有在 chan 上等待的进程。它扫描整个进程表，凡是 p->chan == chan 的进程，都把 chan 清零，
+// 表示“唤醒已经发生”。如果那个进程已经睡下了（SLEEPING），再把它改成 RUNNABLE。它不会切换 CPU，
+// 被唤醒的进程要等 scheduler 下次选中它才会运行
 void
 wakeup(void *chan)
 {
@@ -685,6 +718,8 @@ wakeup(void *chan)
 // Kill the process with the given pid.
 // The victim won't exit until it tries to return
 // to user space (see usertrap() in trap.c).
+// 在进程表里找到 pid 等于参数的进程，把它的 killed 标志设置为 1。如果它正在睡眠，就改成 RUNNABLE，
+// 让它醒过来。找到返回 0，找不到返回 -1。它不会立刻杀死进程，只是做一个标记
 int
 kkill(int pid)
 {
@@ -728,10 +763,13 @@ killed(struct proc *p)
 // Copy to either a user address, or kernel address,
 // depending on usr_dst.
 // Returns 0 on success, -1 on error.
+// 把内核里 src 开始的 len 个字节复制到 dst。dst 可能是用户地址，也可能是内核地址，由 user_dst
+// 决定：为 1 时 dst 是当前进程的用户虚拟地址，走 copyout；为 0 时 dst 是内核地址，直接 memmove
 int
 either_copyout(int user_dst, uint64 dst, void *src, uint64 len)
 {
   struct proc *p = myproc();
+  // dst 是用户虚拟地址，在内核页表里没有映射，不能直接当指针用
   if (user_dst) {
     return copyout(p->pagetable, p->sz, dst, src, len);
   } else {
@@ -758,9 +796,13 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
 // Print a process listing to console.  For debugging.
 // Runs when user types ^P on console.
 // No lock to avoid wedging a stuck machine further.
+// 把进程表里所有正在使用的槽打印到控制台，每行一个进程，格式是 pid 状态 进程名。它只用来调试：在 xv6
+// 控制台按 Ctrl-P 就会调用它。它故意不加锁，这样在系统卡死时也能用它看看各个进程停在什么状态
 void
 procdump(void)
 {
+  // C99 引入的数组指定初始化器，[SLEEPING] = "sleep " 的意思是：直接将数组中下标为 SLEEPING 的
+  // 元素初始化为 "sleep"
   static char *states[] = {
     // clang-format off
     [UNUSED]    = "unused",
