@@ -6,14 +6,19 @@
         # push registers, call kerneltrap().
         # when kerneltrap() returns, restore registers, return.
         #
+# 将 kerneltrap 声明为全局符号，其本身是一个 C 函数
 .globl kerneltrap
 .globl kernelvec
+# 让下面的 kernelvec 对齐到 4 字节边界
 .align 4
+# 标号，代表下一条指令的地址
 kernelvec:
         # make room to save registers.
+        # 在当前的内核栈上腾出 256 字节来保存寄存器
         addi sp, sp, -256
 
         # save caller-saved registers.
+        # 只保存调用者保存寄存器
         sd ra, 0(sp)
         # sd sp, 8(sp)
         sd gp, 16(sp)
