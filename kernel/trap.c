@@ -110,6 +110,7 @@ usertrap(void)
   prepare_return();
 
   // the user page table to switch to, for trampoline.S
+  // 将用户进程的页表地址拼装成 64 位的 satp 控制字
   uint64 satp = MAKE_SATP(p->pagetable);
 
   // return to trampoline.S; satp value in a0.
@@ -119,6 +120,7 @@ usertrap(void)
 //
 // set up trapframe and control registers for a return to user space
 //
+// 返回用户态之前的准备工作
 void
 prepare_return(void)
 {
@@ -127,14 +129,23 @@ prepare_return(void)
   // we're about to switch the destination of traps from
   // kerneltrap() to usertrap(). because a trap from kernel
   // code to usertrap would be a disaster, turn off interrupts.
+  // 需要关掉中断，原因在于下一步要把 stvec 改成 uservec，但这时 CPU 还在内核里。如果之后
+  // 来了一次中断，CPU 会跳到 uservec，而 uservec 假定自己是从用户态进来的：它会把当前
+  // 寄存器当成用户寄存器存进 trapframe，再把 sp 换成内核栈的顶部，正在运行的内核代码的状态
+  // 就被破坏了，所以从这里开始一直关着中断，直到 userret 最后执行 sret 回到用户态
   intr_off();
 
   // send syscalls, interrupts, and exceptions to uservec in trampoline.S
+  // uservec 这个符号的地址是它在内核代码段里的位置，也就是 0x80006000 那一页里的某个地址，
+  // 但用户页表里没有映射这个地址，只映射了高地址 TRAMPOLINE（0x3ffffff000）。从用户态
+  // 陷入时，satp 还是用户页表，所以 stvec 里必须是用户页表能访问的地址。做法是先算出
+  // uservec 在 trampoline 页里的偏移，再加上 TRAMPOLINE
   uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);
   w_stvec(trampoline_uservec);
 
   // set up trapframe values that uservec will need when
   // the process next traps into the kernel.
+  // 填写 trapframe 里的内核字段
   p->trapframe->kernel_satp = r_satp();         // kernel page table
   p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
   p->trapframe->kernel_trap = (uint64)usertrap;
@@ -144,30 +155,37 @@ prepare_return(void)
   // to get to user space.
 
   // set S Previous Privilege mode to User.
+  // 设置 sret 后的特权级和中断状态
   unsigned long x = r_sstatus();
   x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
   x |= SSTATUS_SPIE; // enable interrupts in user mode
   w_sstatus(x);
 
   // set S Exception Program Counter to the saved user pc.
+  // 设置返回地址
   w_sepc(p->trapframe->epc);
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
+// 处理内核态运行时发生的陷入
 void
 kerneltrap()
 {
+  // 先把三个陷入寄存器存进局部变量
   int which_dev = 0;
   uint64 sepc = r_sepc();
   uint64 sstatus = r_sstatus();
   uint64 scause = r_scause();
 
+  // 陷入前必须处于 S 态
   if ((sstatus & SSTATUS_SPP) == 0)
     panic("kerneltrap: not from supervisor mode");
+  // 中断必须关着
   if (intr_get() != 0)
     panic("kerneltrap: interrupts enabled");
 
+  // 只接受设备中断
   if ((which_dev = devintr()) == 0) {
     // interrupt or trap from an unknown source
     printk("scause=0x%lx sepc=0x%lx stval=0x%lx\n", scause, r_sepc(),
@@ -176,18 +194,26 @@ kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
+  // 时钟中断：内核里也会被抢占
+  // 时钟中断也可能打断 scheduler 本身，scheduler 会在 intr_on() 和 intr_off() 之间
+  // 短暂打开中断。这时 CPU 上没有进程，yield 里访问 p->lock 就是空指针解引用，要跳过
   if (which_dev == 2 && myproc() != 0)
     yield();
 
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.
+  // 写回 sepc 和 sstatus
   w_sepc(sepc);
   w_sstatus(sstatus);
 }
 
+// 处理时钟中断，做两件事：如果当前是 hart 0，就把全局时钟 ticks 加 1，并唤醒等待时间的进程；
+// 不管是哪个 CPU，都设定下一次时钟中断的时间。它不负责切换进程，让出 CPU 的 yield() 是调用者
+// 在它返回后才调用的
 void
 clockintr()
 {
+  // 只有 hart 0 计时
   if (cpuid() == 0) {
     acquire(&tickslock);
     ticks++;
@@ -198,6 +224,7 @@ clockintr()
   // ask for the next timer interrupt. this also clears
   // the interrupt request. 1000000 is about a tenth
   // of a second.
+  // 设定下一次中断，每个 CPU 都必须做
   w_stimecmp(r_time() + 1000000);
 }
 
@@ -206,17 +233,24 @@ clockintr()
 // returns 2 if timer interrupt,
 // 1 if other device,
 // 0 if not recognized.
+// 判断这次陷入是不是设备中断。如果是，就把它处理掉
 int
 devintr()
 {
   uint64 scause = r_scause();
 
+  // scause 的最高位表示这次陷入是中断还是异常，低位是具体的编号：0x8000000000000009
+  // 最高位是 1，编号 9，对应 S 态外部中断；0x8000000000000005 的最高位是 1，编号 5，
+  // 对应 S 态时钟中断；8 最高位是 0，编号 8，对应用户态 ecall；13、15 最高位是 0，
+  // 13 读缺页，15 写缺页
   if (scause == 0x8000000000000009L) {
     // this is a supervisor external interrupt, via PLIC.
 
     // irq indicates which device interrupted.
+    // 外部中断只有一根线连到 CPU，CPU 只知道“有设备要求中断”，不知道是哪个设备，要问 PLIC
     int irq = plic_claim();
 
+    // 按中断号分发
     if (irq == UART0_IRQ) {
       uartintr();
     } else if (irq == VIRTIO0_IRQ) {
@@ -228,12 +262,14 @@ devintr()
     // the PLIC allows each device to raise at most one
     // interrupt at a time; tell the PLIC the device is
     // now allowed to interrupt again.
+    // 通知处理完了
     if (irq)
       plic_complete(irq);
 
     return 1;
   } else if (scause == 0x8000000000000005L) {
     // timer interrupt.
+    // 时钟中断，交给 clockintr()
     clockintr();
     return 2;
   } else {
